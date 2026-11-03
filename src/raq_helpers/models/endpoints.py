@@ -1,6 +1,8 @@
 """Shared model references for generated endpoint definitions."""
 
-from pydantic import BaseModel, Field, ValidationInfo, field_serializer, field_validator
+from typing import Generic, Literal, TypeVar
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_serializer, field_validator
 
 
 class ModelReference(BaseModel):
@@ -96,3 +98,45 @@ class ResponseCollection(BaseModel):
     loop_detected: ModelReference | None = Field(None, alias="508")
     not_extended: ModelReference | None = Field(None, alias="510")
     network_authentication_required: ModelReference | None = Field(None, alias="511")
+
+
+ResponsesT = TypeVar("ResponsesT", bound=ResponseCollection)
+HTTPMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"]
+
+
+class EndpointOperation(BaseModel, Generic[ResponsesT]):
+    model_config = ConfigDict(extra="forbid")
+
+    method: HTTPMethod
+    operationId: str | None = None
+    summary: str | None = None
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    request: ModelReference
+    responses: ResponsesT
+    payload: Literal["params", "json"] = "params"
+
+    @field_validator("method", mode="before")
+    @classmethod
+    def normalize_method(cls, value):
+        return value.upper() if isinstance(value, str) else value
+
+
+class Endpoint(BaseModel, Generic[ResponsesT]):
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str
+    method: EndpointOperation[ResponsesT]
+
+    def __repr_args__(self):
+        codes = [
+            field.alias
+            for name, field in type(self.method.responses).model_fields.items()
+            if getattr(self.method.responses, name) is not None
+        ]
+        return [
+            ("endpoint", self.endpoint),
+            ("id", self.method.operationId),
+            ("method", self.method.method),
+            ("codes", codes),
+        ]

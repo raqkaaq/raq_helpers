@@ -47,8 +47,6 @@ class ModelGenerator(GeneratorBase):
             else f"{self.output_path.stem}_registry.py"
         )
         self.registry_path = self.output_path.with_name(registry_filename)
-        if self.registry_path == self.output_path:
-            raise ValueError("The model filename must differ from registry.py.")
         self.metadata_path = self.output_dir / metadata_filename
         self.options = deepcopy(dict(options)) if options is not None else {}
 

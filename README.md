@@ -1,7 +1,14 @@
 # raq_helpers
 
+Tests: `uv sync --group dev`, then `uv run python -m pytest`. For coverage, add
+`--cov=raq_helpers --cov-report=term-missing`.
+
 Shared async HTTP client and OpenAPI generation tools. API-specific configuration
 belongs to the caller; generators accept a loaded schema and explicit output paths.
+
+HTTP caching uses SQLite by default. Supplying `cache_redis_url` selects Hishel's
+Redis backend; `cache_key_prefix` separates API caches, and the same `cache_ttl`
+applies to either backend.
 
 ```python
 import json

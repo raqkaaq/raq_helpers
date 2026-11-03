@@ -12,9 +12,10 @@ from pathlib import Path
 from typing import Mapping
 
 import httpx2
-from hishel import AsyncSqliteStorage, BaseFilter, FilterPolicy, Request, Response
+from hishel import AsyncRedisStorage, AsyncSqliteStorage, BaseFilter, FilterPolicy, Request, Response
 from hishel.httpx2 import AsyncCacheClient, AsyncCacheTransport
 from pydantic import ValidationError
+from redis.asyncio import Redis
 
 from .cache_filters import MethodFilter, StatusCodeFilter, URLPatternFilter
 
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class _UseClassDefault:
-    """Distinguish an omitted timeout from an explicit None (no timeout)."""
+    """Distinguish an omitted setting from an explicit None (no limit)."""
 
 
 _USE_CLASS_DEFAULT = _UseClassDefault()
@@ -32,6 +33,8 @@ class Client:
     CACHE_EXCLUDE_PATTERNS: tuple[str, ...] = ()
     CACHE_METHODS: tuple[str, ...] = ("GET",)
     CACHE_STATUS_CODES: tuple[int, ...] = (200, 201, 202, 204)
+    CACHE_KEY_PREFIX: str = "raq_helpers"
+    CACHE_MAX_RESPONSE_BYTES: int | None = 10 * 1024 * 1024
     MAX_REDIRECTS = 10
     TIMEOUT = httpx2.Timeout(10.0, connect=60.0)
 
@@ -52,8 +55,11 @@ class Client:
         self,
         *,
         url: str,
-        cache_db_path: str | Path,
+        cache_db_path: str | Path | None = None,
         cache_ttl: int,
+        cache_redis_url: str | None = None,
+        cache_key_prefix: str | None = None,
+        cache_max_response_bytes: int | None | _UseClassDefault = _USE_CLASS_DEFAULT,
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, str] | None = None,
         request_filters: list[BaseFilter[Request]] | None = None,
@@ -62,10 +68,30 @@ class Client:
         max_redirects: int | None = None,
     ):
         self.url = url
-        self.storage = AsyncSqliteStorage(
-            database_path=cache_db_path,
-            default_ttl=cache_ttl,
-        )
+        cache_redis_url = cache_redis_url.strip() if cache_redis_url else None
+        self.storage: AsyncRedisStorage | AsyncSqliteStorage
+        if cache_redis_url:
+            if cache_key_prefix is None:
+                cache_key_prefix = self.CACHE_KEY_PREFIX
+            if isinstance(cache_max_response_bytes, _UseClassDefault):
+                cache_max_response_bytes = self.CACHE_MAX_RESPONSE_BYTES
+            if not cache_key_prefix.strip():
+                raise ValueError("cache_key_prefix must not be empty for Redis.")
+            if cache_max_response_bytes is not None and cache_max_response_bytes <= 0:
+                raise ValueError("cache_max_response_bytes must be positive or None.")
+            self.storage = AsyncRedisStorage(
+                client=Redis.from_url(cache_redis_url, decode_responses=False),
+                ttl=cache_ttl,
+                key_prefix=cache_key_prefix,
+                max_stream_size=cache_max_response_bytes,
+            )
+        else:
+            if cache_db_path is None:
+                raise ValueError("cache_db_path is required when Redis is not configured.")
+            self.storage = AsyncSqliteStorage(
+                database_path=cache_db_path,
+                default_ttl=cache_ttl,
+            )
         self.policy = FilterPolicy(
             request_filters=(
                 request_filters
@@ -216,11 +242,14 @@ class Client:
     def retry(func):
         @wraps(func)
         async def wrapper(self, *args, **kwargs):
-            if self.MAX_RETRIES < 1:
+            max_retries = self.MAX_RETRIES
+            if max_retries < 1:
                 raise ValueError("MAX_RETRIES must be at least 1.")
 
             async with asyncio.timeout(self.MAX_RETRY_DELAY):
-                for attempt in range(1, self.MAX_RETRIES + 1):
+                attempt = 0
+                while True:
+                    attempt += 1
                     retry_after = 0.0
 
                     try:
@@ -228,14 +257,14 @@ class Client:
                         response.raise_for_status()
                         return response
                     except (httpx2.TimeoutException, httpx2.NetworkError):
-                        if attempt == self.MAX_RETRIES:
+                        if attempt == max_retries:
                             raise
 
                     except httpx2.HTTPStatusError as error:
                         response = error.response
                         if (
                             not self.should_retry_response(response)
-                            or attempt == self.MAX_RETRIES
+                            or attempt == max_retries
                         ):
                             raise
 
